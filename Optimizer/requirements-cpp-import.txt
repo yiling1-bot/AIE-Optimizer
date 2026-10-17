@@ -1,0 +1,2 @@
+# Optional C++ frontend; independent of the optional MLIR parser.
+libclang==18.1.1

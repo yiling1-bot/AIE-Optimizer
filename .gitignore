@@ -1,0 +1,37 @@
+# Python and local dependency environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.deps/
+.pytest_cache/
+
+# Generated projects, measurements, and local tooling
+build/
+output/
+tmp/
+*.log
+*.zip
+*.tar
+*.gz
+*.exe
+*.elf
+*.o
+*.a
+*.so
+*.dll
+*.xclbin
+*.pdi
+.Xil/
+Work/
+aiesimulator_output/
+
+# Local credentials and machine configuration
+.env
+.env.*
+*.pem
+*.key
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

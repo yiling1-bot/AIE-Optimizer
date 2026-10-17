@@ -1,0 +1,96 @@
+#pragma once
+#include <cstdint>
+#ifdef AIE_OPT_HOST
+#include <algorithm>
+#else
+#include <aie_api/aie.hpp>
+#include <aie_api/aie_adf.hpp>
+#endif
+namespace opt {
+using I8 = int8_t;
+using I32 = int32_t;
+constexpr unsigned M=@M@, K=@K@, H=@H@, N=@N@;
+constexpr unsigned GR=@GR@, GROUPS=@GROUPS@;
+constexpr bool RELU=@RELU@;
+
+inline void multiply(const I8* a,const I8* b,I32* sum,bool initialize) {
+#ifdef AIE_OPT_HOST
+  for(unsigned i=0;i<4;++i) for(unsigned j=0;j<8;++j) {
+    I32 value=initialize?0:sum[i*8+j];
+    for(unsigned k=0;k<8;++k) value+=I32(a[i*8+k])*I32(b[k*8+j]);
+    sum[i*8+j]=value;
+  }
+#else
+  using Calc=aie::mmul<4,8,8,int8,int8,acc32>;
+  Calc c;
+  if(initialize) c.mul(aie::load_v<32>(a),aie::load_v<64>(b));
+  else {
+    c=Calc(aie::from_vector<acc32>(aie::load_v<32>(sum)));
+    c.mac(aie::load_v<32>(a),aie::load_v<64>(b));
+  }
+  aie::store_v(sum,c.to_accum().template to_vector<int32>(0));
+#endif
+}
+
+inline void quantize(const I32* sum,I8* y,bool relu) {
+#ifdef AIE_OPT_HOST
+  for(unsigned i=0;i<32;++i) y[i]=I8(std::max(relu?0:-128,std::min(127,int(sum[i]))));
+#else
+  auto v=aie::from_vector<acc32>(aie::load_v<32>(sum)).template to_vector<int8>(0);
+  if(relu) v=aie::max(v,int8(0));
+  aie::store_v(y,v);
+#endif
+}
+
+inline void hidden_tile(const I8* x,const I8* w,unsigned rb,unsigned hb,I8* out) {
+  alignas(32) I32 acc[32];
+  for(unsigned kb=0;kb<K/8;++kb)
+    multiply(x+(rb*(K/8)+kb)*32,w+(kb*(H/8)+hb)*64,acc,kb==0);
+  quantize(acc,out,RELU);
+}
+
+inline void output_tile(const I8* h,const I8* w,unsigned rb,unsigned nb,I8* out) {
+  alignas(32) I32 acc[32];
+  for(unsigned hb=0;hb<H/8;++hb)
+    multiply(h+(rb*(H/8)+hb)*32,w+(hb*(N/8)+nb)*64,acc,hb==0);
+  quantize(acc,out,false);
+}
+
+inline void layer0(const I8* x,const I8* w,unsigned group,I8* h) {
+  for(unsigned rb=0;rb<GR/4;++rb) for(unsigned hb=0;hb<H/8;++hb)
+    hidden_tile(x,w,group*(GR/4)+rb,hb,h+(rb*(H/8)+hb)*32);
+}
+inline void layer1(const I8* h,const I8* w,I8* y) {
+  for(unsigned rb=0;rb<GR/4;++rb) for(unsigned nb=0;nb<N/8;++nb)
+    output_tile(h,w,rb,nb,y+(rb*(N/8)+nb)*32);
+}
+
+inline void full_reuse(const I8* x,const I8* w0,const I8* w1,unsigned group,I8* y) {
+  alignas(32) I8 h[GR*H];
+  layer0(x,w0,group,h); layer1(h,w1,y);
+}
+inline void row_streaming(const I8* x,const I8* w0,const I8* w1,unsigned group,I8* y) {
+  alignas(32) I8 h[4*H];
+  for(unsigned rb=0;rb<GR/4;++rb) {
+    for(unsigned hb=0;hb<H/8;++hb) hidden_tile(x,w0,group*(GR/4)+rb,hb,h+hb*32);
+    for(unsigned nb=0;nb<N/8;++nb) output_tile(h,w1,0,nb,y+(rb*(N/8)+nb)*32);
+  }
+}
+inline void hidden_accumulation(const I8* x,const I8* w0,const I8* w1,unsigned group,I8* y) {
+  alignas(32) I8 h[GR*8];
+  alignas(32) I32 acc[GR*N];
+  for(unsigned hb=0;hb<H/8;++hb) {
+    for(unsigned rb=0;rb<GR/4;++rb) hidden_tile(x,w0,group*(GR/4)+rb,hb,h+rb*32);
+    for(unsigned rb=0;rb<GR/4;++rb) for(unsigned nb=0;nb<N/8;++nb)
+      multiply(h+rb*32,w1+(hb*(N/8)+nb)*64,acc+(rb*(N/8)+nb)*32,hb==0);
+  }
+  for(unsigned block=0;block<GR*N/32;++block) quantize(acc+block*32,y+block*32,false);
+}
+inline void recompute(const I8* x,const I8* w0,const I8* w1,unsigned group,I8* y) {
+  alignas(32) I8 h[GR*H];
+  for(unsigned nb=0;nb<N/8;++nb) {
+    layer0(x,w0,group,h);
+    for(unsigned rb=0;rb<GR/4;++rb) output_tile(h,w1,rb,nb,y+(rb*(N/8)+nb)*32);
+  }
+}
+}

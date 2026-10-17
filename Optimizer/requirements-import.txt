@@ -1,0 +1,5 @@
+# Optional MLIR frontend; the existing optimizer remains stdlib-only.
+xdsl==0.71.0
+immutabledict==4.3.1
+ordered-set==4.1.0
+typing-extensions==4.16.0

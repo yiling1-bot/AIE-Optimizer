@@ -1,0 +1,85 @@
+// Operator-local packed representation; no whole-program family dispatch.
+struct V8 { const I8* data; unsigned rows,cols,pitch,layout,row,col; };
+struct V32 { const I32* data; unsigned rows,cols,pitch,layout,row,col; };
+inline unsigned packed4(unsigned r,unsigned c,unsigned pitch) {
+  return ((r/4)*(pitch/8)+c/8)*32+(r%4)*8+c%8;
+}
+inline I8 get8(const V8& a,unsigned r,unsigned c) {
+  r+=a.row; c+=a.col;
+  if(a.layout==4) return a.data[packed4(r,c,a.pitch)];
+  if(a.layout==8) return a.data[((r/8)*(a.pitch/8)+c/8)*64+(r%8)*8+c%8];
+  return a.data[r*a.pitch+c];
+}
+inline I32 get32(const V32& a,unsigned r,unsigned c) {
+  r+=a.row;c+=a.col;
+  return a.data[a.layout==4?packed4(r,c,a.pitch):r*a.pitch+c];
+}
+inline void copy8tile(const I8* src,I8* dst) {
+#ifdef AIE_OPT_HOST
+  for(unsigned i=0;i<32;++i) dst[i]=src[i];
+#else
+  aie::store_v(dst,aie::load_v<32>(src));
+#endif
+}
+inline void copy32tile(const I32* src,I32* dst) {
+#ifdef AIE_OPT_HOST
+  for(unsigned i=0;i<32;++i) dst[i]=src[i];
+#else
+  aie::store_v(dst,aie::load_v<32>(src));
+#endif
+}
+#define OPT_NOINLINE __attribute__((noinline)) inline
+OPT_NOINLINE void op_mm(V8 a,V8 b,I32* out) {
+  const bool direct_a=a.layout==4 && a.row%4==0 && a.col%8==0;
+  const bool direct_b=b.layout==8 && b.row%8==0 && b.col%8==0;
+  for(unsigned rb=0;rb<a.rows;rb+=4) for(unsigned cb=0;cb<b.cols;cb+=8) {
+    alignas(32) I8 aa[32],bb[64]; alignas(32) I32 acc[32];
+    for(unsigned kb=0;kb<a.cols;kb+=8) {
+      const I8 *ap=aa,*bp=bb;
+      if(direct_a) ap=a.data+packed4(rb+a.row,kb+a.col,a.pitch);
+      else for(unsigned r=0;r<4;++r) for(unsigned c=0;c<8;++c) aa[r*8+c]=get8(a,rb+r,kb+c);
+      if(direct_b) bp=b.data+(((kb+b.row)/8)*(b.pitch/8)+(cb+b.col)/8)*64;
+      else for(unsigned r=0;r<8;++r) for(unsigned c=0;c<8;++c) bb[r*8+c]=get8(b,kb+r,cb+c);
+      multiply(ap,bp,acc,kb==0);
+    }
+    copy32tile(acc,out+packed4(rb,cb,b.cols));
+  }
+}
+OPT_NOINLINE void op_q(V32 a,I8* out,bool relu) {
+  const bool direct=a.layout==4 && a.row%4==0 && a.col%8==0;
+  for(unsigned rb=0;rb<a.rows;rb+=4) for(unsigned cb=0;cb<a.cols;cb+=8) {
+    alignas(32) I32 scratch[32]; const I32* src=scratch;
+    if(direct) src=a.data+packed4(rb+a.row,cb+a.col,a.pitch);
+    else for(unsigned r=0;r<4;++r) for(unsigned c=0;c<8;++c) scratch[r*8+c]=get32(a,rb+r,cb+c);
+    quantize(src,out+packed4(rb,cb,a.cols),relu);
+  }
+}
+OPT_NOINLINE void op_copy8(V8 a,I8* out,unsigned pitch,unsigned row,unsigned col) {
+  if(a.layout==4 && a.rows%4==0 && a.cols%8==0 && a.row%4==0 && a.col%8==0 && row%4==0 && col%8==0) {
+    for(unsigned r=0;r<a.rows;r+=4) for(unsigned c=0;c<a.cols;c+=8)
+      copy8tile(a.data+packed4(r+a.row,c+a.col,a.pitch),out+packed4(r+row,c+col,pitch));
+  } else for(unsigned r=0;r<a.rows;++r) for(unsigned c=0;c<a.cols;++c)
+    out[packed4(r+row,c+col,pitch)]=get8(a,r,c);
+}
+OPT_NOINLINE void op_copy32(V32 a,I32* out,unsigned pitch,unsigned row,unsigned col) {
+  if(a.layout==4 && a.rows%4==0 && a.cols%8==0 && a.row%4==0 && a.col%8==0 && row%4==0 && col%8==0) {
+    for(unsigned r=0;r<a.rows;r+=4) for(unsigned c=0;c<a.cols;c+=8)
+      copy32tile(a.data+packed4(r+a.row,c+a.col,a.pitch),out+packed4(r+row,c+col,pitch));
+  } else for(unsigned r=0;r<a.rows;++r) for(unsigned c=0;c<a.cols;++c)
+    out[packed4(r+row,c+col,pitch)]=get32(a,r,c);
+}
+OPT_NOINLINE void op_add32(V32 a,I32* out) {
+  for(unsigned rb=0;rb<a.rows;rb+=4) for(unsigned cb=0;cb<a.cols;cb+=8) {
+    alignas(32) I32 scratch[32];const I32* src=scratch;
+    if(a.layout==4 && a.row%4==0 && a.col%8==0) src=a.data+packed4(rb+a.row,cb+a.col,a.pitch);
+    else for(unsigned r=0;r<4;++r) for(unsigned c=0;c<8;++c) scratch[r*8+c]=get32(a,rb+r,cb+c);
+    I32* dst=out+packed4(rb,cb,a.cols);
+#ifdef AIE_OPT_HOST
+    for(unsigned i=0;i<32;++i) dst[i]+=src[i];
+#else
+    aie::store_v(dst,aie::add(aie::load_v<32>(dst),aie::load_v<32>(src)));
+#endif
+  }
+}
+OPT_NOINLINE void op_pack8(V8 a,I8* out) {op_copy8(a,out,a.cols,0,0);}
+#undef OPT_NOINLINE

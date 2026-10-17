@@ -1,0 +1,3 @@
+# Both optional import frontends, for the complete regression suite.
+-r Optimizer/requirements-import.txt
+-r Optimizer/requirements-cpp-import.txt
