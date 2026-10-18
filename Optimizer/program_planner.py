@@ -16,13 +16,14 @@ INLINE = {'constant', 'splat', 'add', 'mul', 'min_signed', 'max_signed',
 
 
 def implementation_identity():
-    names = ('program_ir.py', 'program_rules.py', 'program_planner.py', 'program_backend.py', 'program_kernels.py')
+    names = ('program_ir.py', 'program_rules.py', 'program_planner.py', 'program_backend.py', 'program_kernels.py',
+             'program_egraph.py', 'program_equalities.py')
     return identity({n: sha256(Path(__file__).with_name(n).read_bytes()).hexdigest() for n in names})
 
 
 def make_plan(contract, *, trace=None, cuts=(), fuse=False, matmul_order='ijk', registry=None,
               lowerings=None, implementation_registry=None):
-    base, target = validate_contract(contract)
+    base, target = validate_contract(contract, registry)
     trace = [] if trace is None else trace
     program = replay(base, trace, registry); nodes = live_nodes(program)
     if any(v['type']['bits'] not in (8, 16, 32) for v in program['inputs'] + nodes):
@@ -113,7 +114,7 @@ def validate_plan(contract, plan, registry=None, implementation_registry=None):
 
 def enumerate_plans(contract, *, max_plans=24, max_variants=6, max_depth=1, registry=None, evaluator=None,
                     max_implementations=4, implementation_registry=None):
-    base, target = validate_contract(contract)
+    base, target = validate_contract(contract, registry)
     if type(max_plans) is not int or not 1 <= max_plans <= 256: raise ValueError('plan budget must be 1..256')
     variants, report = semantic_variants(base, max_variants, max_depth, registry)
     proposals = []

@@ -74,6 +74,17 @@ def main(argv=None):
     ps.add_argument('--evaluation',type=Path);ps.add_argument('--output',type=Path,required=True)
     ps.add_argument('--max-implementations',type=int,default=4);ps.add_argument('--kernel-model',type=Path)
     ps.add_argument('--model-frames',type=int,default=1)
+    es=sub.add_parser('program-egraph-space',help='Joint typed multi-output e-DAG and implementation exploration')
+    es.add_argument('contract',type=Path);es.add_argument('--output',type=Path,required=True)
+    es.add_argument('--max-rounds',type=int,default=2);es.add_argument('--max-applications',type=int,default=24)
+    es.add_argument('--max-terms',type=int,default=1200);es.add_argument('--max-states',type=int,default=10000)
+    es.add_argument('--max-dags',type=int,default=16);es.add_argument('--max-plans',type=int,default=64)
+    es.add_argument('--max-plans-per-dag',type=int,default=16);es.add_argument('--max-implementations',type=int,default=4)
+    es.add_argument('--evaluation',type=Path)
+    eg=sub.add_parser('program-egraph-generate',help='Generate a certified candidate directly from an e-graph search space')
+    eg.add_argument('space',type=Path);eg.add_argument('--index',type=int,required=True)
+    eg.add_argument('--frames',type=int,default=4);eg.add_argument('--compiler',default='g++')
+    eg.add_argument('--output',type=Path,required=True)
     pg=sub.add_parser('program-generate',help='Generate a complete typed multi-input/multi-output ADF program')
     pg.add_argument('contract',type=Path);pg.add_argument('plan',type=Path);pg.add_argument('--frames',type=int,default=4)
     pg.add_argument('--compiler',default='g++');pg.add_argument('--output',type=Path,required=True)
@@ -91,8 +102,53 @@ def main(argv=None):
     pc.add_argument('--frames',type=int,default=1)
     pc=sub.add_parser('program-freeze-predictions',help='Freeze all HO predictions before native execution')
     pc.add_argument('design',type=Path);pc.add_argument('model',type=Path);pc.add_argument('--output',type=Path,required=True)
+    ac=sub.add_parser('analyzer-capture',help='Freeze an external AIE1 Analyzer source snapshot')
+    ac.add_argument('source',type=Path);ac.add_argument('--output-directory',type=Path,required=True)
+    ac=sub.add_parser('analyzer-candidate',help='Bind an existing normal request to a compiled candidate')
+    ac.add_argument('request',type=Path);ac.add_argument('--plan-id');ac.add_argument('--label',default='')
+    ac.add_argument('--policy',choices=('exact_inputs','dense_packet_interleaving'),default='exact_inputs')
+    ac.add_argument('--output',type=Path,required=True)
+    ac=sub.add_parser('analyzer-schedule-space',help='Generate FIFO-preserving dense packet scheduling witnesses')
+    ac.add_argument('request',type=Path);ac.add_argument('--output-directory',type=Path,required=True)
+    ac=sub.add_parser('analyzer-evaluate',help='Evaluate compiled candidates with the isolated Analyzer and rank compatible groups')
+    ac.add_argument('candidates',type=Path);ac.add_argument('--backend',type=Path,required=True)
+    ac.add_argument('--output-directory',type=Path,required=True);ac.add_argument('--timeout',type=float,default=300)
+    ac.add_argument('--metric',choices=('first_output','batch_complete'),default='batch_complete')
+    ac.add_argument('--no-prepared',action='store_true')
+    ac=sub.add_parser('analyzer-prepare',help='Extract and prepare existing compiled artifacts with the frozen Analyzer')
+    ac.add_argument('extraction',type=Path);ac.add_argument('preparation',type=Path)
+    ac.add_argument('--backend',type=Path,required=True);ac.add_argument('--output-directory',type=Path,required=True)
+    ac.add_argument('--plan-id');ac.add_argument('--timeout',type=float,default=300)
+    ac.add_argument('--policy',choices=('exact_inputs','dense_packet_interleaving'),default='exact_inputs')
     args=p.parse_args(argv)
     read=lambda path:json.loads(path.read_text(encoding='utf-8'))
+    if args.command.startswith('analyzer-'):
+        from .compiled_analyzer import capture_analyzer,make_candidate,save_new,strict_json
+        read=lambda path:strict_json(path.read_bytes())
+        if args.command=='analyzer-capture':
+            result=capture_analyzer(args.source,args.output_directory)
+            print(json.dumps({'backend_id':result['id'],'source_files':len(result['files'])}));return 0
+        if args.command=='analyzer-candidate':
+            result=make_candidate(args.request,plan_id=args.plan_id,label=args.label,policy=args.policy)
+            save_new(args.output,result);print(json.dumps({'candidate_id':result['id']}));return 0
+        if args.command=='analyzer-schedule-space':
+            from .packet_schedules import schedule_candidates
+            result=schedule_candidates(args.request,args.output_directory)
+            print(json.dumps({'candidates':len(result['candidates']),'output_directory':str(args.output_directory.resolve())}));return 0
+        if args.command=='analyzer-prepare':
+            from .compiled_analyzer import prepare_compiled_candidate
+            result=prepare_compiled_candidate(read(args.backend),args.extraction,args.preparation,args.output_directory,
+                plan_id=args.plan_id,policy=args.policy,timeout=args.timeout)
+            print(json.dumps({'candidate_id':result['candidate']['id'],'output_directory':str(args.output_directory.resolve())}));return 0
+        from .compiled_search import compiled_campaign
+        value=read(args.candidates)
+        candidates=value if isinstance(value,list) else value.get('candidates',[value])
+        result=compiled_campaign(candidates,read(args.backend),args.output_directory,metric=args.metric,
+                                 timeout=args.timeout,reuse_prepared=not args.no_prepared)
+        print(json.dumps({'evaluated':len(candidates),'compatible_ranking_groups':len(result['ranking']['groups']),
+            'unknown':len(result['ranking']['unknown_candidates']),'refused':len(result['ranking']['refused_candidates']),
+            'output_directory':str(args.output_directory.resolve())}))
+        return int(bool(result['ranking']['refused_candidates']))*2
     if args.command.startswith('program-'):
         from .program_ir import program_from_import
         from .program_planner import enumerate_plans as program_plans
@@ -111,6 +167,24 @@ def main(argv=None):
             from .program_cost_model import freeze_predictions
             result=freeze_predictions(read(args.design),read(args.model))
         elif args.command=='program-import':result=program_from_import(read(args.artifact),Target(max_compute_tiles=args.max_cores))
+        elif args.command=='program-egraph-space':
+            from .program_search import enumerate_egraph_plans
+            evaluator=None
+            if args.evaluation:
+                config=read(args.evaluation)
+                evaluator=lambda contract,plan:evaluate_costs(contract,plan,config['registry'],config['selection'])
+            candidates,report=enumerate_egraph_plans(read(args.contract),evaluator=evaluator,
+                max_rounds=args.max_rounds,max_applications=args.max_applications,max_terms=args.max_terms,
+                max_states=args.max_states,max_dags=args.max_dags,max_plans=args.max_plans,
+                max_plans_per_dag=args.max_plans_per_dag,max_implementations=args.max_implementations)
+            result={'schema':'aie-optimizer-certified-program-space-v1','candidates':candidates,'report':report}
+        elif args.command=='program-egraph-generate':
+            space=read(args.space)
+            if space.get('schema')!='aie-optimizer-certified-program-space-v1':raise ValueError('certified program space required')
+            if not 0 <= args.index < len(space['candidates']):raise ValueError('candidate index outside space')
+            candidate=space['candidates'][args.index]
+            result=program_generate(candidate['contract'],candidate['plan'],args.output,frames=args.frames,compiler=args.compiler)
+            print(json.dumps({'artifact':str(args.output.resolve()),'candidate_id':result['plan']['id']}));return 0
         elif args.command=='program-space':
             contract=read(args.contract);evaluator=None
             if args.evaluation:

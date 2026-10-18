@@ -21,13 +21,17 @@ class Node:
 
 
 def extract_dags(nodes, roots, *, max_states=100000, keep=8, evaluate=None, evaluator_costs_complete=False,
-                 visit_complete=None):
+                 visit_complete=None, max_complete=None, option_priority=None):
     if type(max_states) is not int or max_states<1 or type(keep) is not int or keep<1:
         raise ValueError('positive extraction budgets required')
     if not roots:
         raise ValueError('at least one root required')
     if type(evaluator_costs_complete) is not bool:
         raise ValueError('explicit evaluator cost coverage flag required')
+    if max_complete is not None and (type(max_complete) is not int or max_complete < 1):
+        raise ValueError('positive complete-assignment budget required')
+    if option_priority is not None and not callable(option_priority):
+        raise ValueError('callable traversal priority required')
     nodes=tuple(nodes)
     by_class = {}; by_id = {}
     for n in nodes:
@@ -44,9 +48,10 @@ def extract_dags(nodes, roots, *, max_states=100000, keep=8, evaluate=None, eval
         reachable.add(c); pending.extend(k for n in by_class[c] for k in n.children)
     unknown_possible = any(n.cost is None for c in reachable for n in by_class[c])
     for options in by_class.values():
-        options.sort(key=lambda n:(n.cost is None,0 if n.cost is None else n.cost,len(n.children),n.id))
+        options.sort(key=lambda n:((option_priority(n),) if option_priority else ())+
+                     (n.cost is None,0 if n.cost is None else n.cost,len(n.children),n.id))
     best = []; unknown = []; states = 0; complete = 0; cycles = 0; refused = 0; pruned = 0
-    exhausted = True; evaluator_unknown_seen=False
+    exhausted = True; evaluator_unknown_seen=False; visitor_budget_reached=False
     # A custom evaluator can discover missing coverage only at a complete DAG.
     # Unless its caller guarantees complete coverage, cost pruning could hide an
     # unknown candidate behind an already known incumbent.
@@ -54,13 +59,16 @@ def extract_dags(nodes, roots, *, max_states=100000, keep=8, evaluate=None, eval
 
     def has_cycle(chosen):
         visited=set(); active=set()
-        def visit(c):
-            if c in active:return True
-            if c in visited or c not in chosen:return False
-            active.add(c)
-            if any(visit(k) for k in chosen[c].children):return True
-            active.remove(c);visited.add(c);return False
-        return any(visit(c) for c in chosen)
+        for root in chosen:
+            stack=[(root,False)]
+            while stack:
+                c,exiting=stack.pop()
+                if c in visited or c not in chosen:continue
+                if exiting:active.remove(c);visited.add(c);continue
+                if c in active:return True
+                active.add(c);stack.append((c,True))
+                stack.extend((k,False) for k in reversed(chosen[c].children))
+        return False
 
     # Explicit stack avoids Python recursion limits for large dependency DAGs.
     stack=[({},set(roots),0,False)]
@@ -72,9 +80,15 @@ def extract_dags(nodes, roots, *, max_states=100000, keep=8, evaluate=None, eval
             pruned+=1;continue
         missing=demand-chosen.keys()
         if not missing:
+            if max_complete is not None and complete >= max_complete:
+                stack.append((chosen,demand,lower,uncovered));exhausted=False;break
             complete+=1
             selected={c:n.id for c,n in sorted(chosen.items())}
-            if visit_complete is not None:visit_complete(dict(selected))
+            if visit_complete is not None and visit_complete(dict(selected)) is False:
+                # A visitor may explicitly refuse admission at its declared
+                # budget. The unconsumed assignment remains unexplored.
+                complete-=1;stack.append((chosen,demand,lower,uncovered))
+                exhausted=False;visitor_budget_reached=True;break
             metrics = evaluate(selected) if evaluate else {'cost':None if uncovered else lower}
             if metrics is None:
                 refused+=1;continue
@@ -105,6 +119,8 @@ def extract_dags(nodes, roots, *, max_states=100000, keep=8, evaluate=None, eval
         'resource_refusals':refused,'bound_prunes':pruned,'search_exhausted':exhausted,
         'unknown_cost_reachable':unknown_possible or evaluator_unknown_seen,'unexplored_states':len(stack),
         'evaluator_costs_complete':evaluate is None or evaluator_costs_complete,
+        'complete_budget_reached':not exhausted and max_complete is not None and complete>=max_complete,
+        'visitor_budget_reached':visitor_budget_reached,
         'optimality':('exact_in_known_cost_subspace' if unknown_possible or evaluator_unknown_seen else 'exact_in_supplied_space')
             if exhausted else 'best_found_budget_limited',
         'scope':'global shared DAG, one representative per e-class; supplied roots, costs and evaluator only'}

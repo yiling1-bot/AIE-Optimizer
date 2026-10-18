@@ -120,7 +120,7 @@ def normalize_imported_program(program):
     return program_from_builder(graph, [mapped[o['value']] for o in program['outputs']], program['entry']), binding
 
 
-def validate_contract(contract):
+def validate_contract(contract, equality_registry=None):
     if contract.get('schema') != 'aie-optimizer-program-v1': raise ValueError('program contract schema')
     target = Target(**contract['target'])
     expected = make_program(contract['program'], target, contract['source'])
@@ -132,9 +132,25 @@ def validate_contract(contract):
         normalized, binding = normalize_imported_program(original)
         if set(source) != {'kind', 'artifact', 'input_binding'} or normalized != contract['program'] or source['input_binding'] != binding:
             raise ValueError('whole source function differs from program')
+    elif source['kind'] == 'verified_egraph_extraction':
+        if set(source) != {'kind', 'original', 'certificate'}:
+            raise ValueError('exact equivalence provenance required')
+        original = source['original']
+        if original.get('source', {}).get('kind') == 'verified_egraph_extraction':
+            raise ValueError('nested equivalence provenance is not supported')
+        validate_contract(original)
+        from .program_egraph import check_extraction
+        checked = check_extraction(source['certificate'], original['program'], equality_registry)
+        if checked != contract['program'] or original['target'] != contract['target']:
+            raise ValueError('equivalence proof differs from program or target')
     elif source != {'kind': 'declared_tensor_ssa'}:
         raise ValueError('unknown source provenance')
     return contract['program'], target
+
+
+def original_contract(contract):
+    """Call only after validation; preserve the original semantic oracle."""
+    return contract['source']['original'] if contract['source']['kind'] == 'verified_egraph_extraction' else contract
 
 
 def live_nodes(program):

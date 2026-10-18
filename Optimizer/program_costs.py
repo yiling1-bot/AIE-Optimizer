@@ -7,7 +7,7 @@ from dataclasses import asdict
 from hashlib import sha256
 
 from .contracts import identity
-from .program_ir import seal, transfer_elements
+from .program_ir import seal, transfer_elements, original_contract
 from .program_planner import validate_plan
 from .analyzer_bridge import (SIGNATURE_SCHEMA, ClockDomain, ClockedCausalGraph,
     CausalRule, CausalParent, DeclaredEvent, diagnose_clocked_graph,
@@ -86,7 +86,7 @@ def cost_request(contract, plan, *, core_period_ps=800, rewrite_registry=None, i
     request = {'schema': 'aie-optimizer-program-cost-request-v1', 'contract_id': contract['id'], 'plan_id': plan['id'],
         'components': list(components.values()), 'graph': asdict(graph), 'output_event': complete,
         'planned_compute_tiles': plan['planned_compute_tiles'],
-        'comparison_key': identity({'contract': contract['id'], 'clocks': clocks, 'frame': 0,
+        'comparison_key': identity({'contract': original_contract(contract)['id'], 'clocks': clocks, 'frame': 0,
                                     'metric': 'request_origin_to_all_complete_outputs'}),
         'dependency_hashes': dependency_hashes(),
         'adapter_sha256': sha256(__import__('pathlib').Path(__file__).read_bytes()).hexdigest(), 'native_admitted': False,

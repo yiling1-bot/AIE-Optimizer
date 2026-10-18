@@ -1,0 +1,15 @@
+feat(optimizer): add certified multi-output tensor e-graph search
+
+- Import general tensor SSA into typed e-classes with congruence and shared multi-root extraction.
+- Register M/K/N partitions, guarded integer matrix reassociation/factorization and elementwise/view equalities.
+- Seed rule-family diversity before bounded joint deployment and kernel selection; retain reference and unknown costs.
+- Replay extraction certificates at contract, plan and generation boundaries; retain the original source oracle.
+- Scope conditional comparison to the certified original workload and reject stale generator-bound models.
+- Add semantic, sharing, exhaustive-oracle, tamper, budget and generation regression tests and reusable witnesses.
+
+If committing all current pending work, including the preceding uncommitted Analyzer integration:
+
+feat(optimizer): connect compiled analysis and certified tensor search
+
+Include the preceding frozen AIE1 Analyzer adapter, preparation, conditional ranking and protocol witnesses.
+No automatic AIE1 generation, cross-compile performance admission, new native timing or hardware optimality claim.

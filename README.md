@@ -12,10 +12,10 @@ AIE Optimizer 从经过检查的计算语义出发，构造同一算法的多种
 | --- | --- | --- |
 | 代码导入 | 基于 xDSL 的静态整数张量 MLIR 导入；基于 Clang AST 的 C++ 数组循环导入 | 导入范围大于代码生成范围；不支持的语义给出拒绝原因 |
 | 语义与等价类 | 类型、形状和整数范围检查；可重放的改写记录；e-class 合并、hash-consing 与同余闭包 | 可信 Python 规则注册接口，不是外部形式化证明器 |
-| 实现探索 | 既有等价类抽取；通用 SSA 的 M/K 分解、融合、核划分及逐节点实现族组合；合并相同生成实现 | 有界展开；新通用算子路径尚未全部接入既有 e-graph |
+| 实现探索 | 通用 SSA 多输出等价类、共享 DAG 抽取；M/K/N 分解、矩阵重结合/因子合并、融合及逐节点实现族组合 | 有界结构覆盖与联合比较；每类一个代表，任意克隆/重算和布局仍待扩展 |
 | 执行与部署 | 融合、核复用、独立核组、汇聚、累加器网格、输出直写、循环交换、scratch 调度 | 8 条已实现执行规则；cascade、通用 DMA 和布局自动优化尚待实现 |
-| 成本与筛选 | 通用首帧组件请求；原 ELF 周期采集、TRAIN 限域拟合、冻结留出预测及条件排序 | 首个模型仅为单核单帧 GEMM 家族；传输为名义服务，启动/同步为合并残差；真实 DMA/锁与跨帧仍待校准 |
-| 生成与验证 | 层数可变、分支、多输出的静态 i8/i16/i32 SSA → ADF/C++；可注册标量与 AIE-ML MMUL grid1x1/1x2；源参考、CPU 与限时原生入口 | MMUL 受类型、微块及 i32 范围守卫约束；目标为 AIE-ML / Vitis 2024.2 |
+| 成本与筛选 | AIE1 已编译候选接入完整 Analyzer；自动提取/准备、组件覆盖和条件排名；AIE-ML 保留原 ELF 限域模型 | AIE1 当前只在同编译程序内比较输入调度；跨编译语义绑定待接；AIE-ML DMA/锁与跨帧仍待校准 |
+| 生成与验证 | 静态多层、多输出 SSA → 证明重放 → ADF/C++；注册式标量与 MMUL；另支持已有 AIE1 编译事实的导入评价 | 自动生成仍面向 AIE-ML / Vitis 2024.2；AIE1 生成与真实编译绑定待接 |
 
 既有 MMUL 优化路径的数值契约为：
 
@@ -78,6 +78,19 @@ python tools/program_reuse_witness.py --output reuse-witness
 算子组合、规则扩展、成本接口及尚未解决的限制见
 [第十一轮通用程序实现](docs/program-ir-v11.zh-CN.md)。
 
+通用 SSA 还可进入多输出等价图，共享中间结果并组合不同计算结构。
+抽取证书在生成入口重放，参考输出继续来自原程序：
+
+```bash
+python -m Optimizer program-egraph-space program.json --max-dags 16 --max-plans 64 --output egraph-space.json
+python -m Optimizer program-egraph-generate egraph-space.json --index 1 --output candidate
+python -m Optimizer cpu candidate
+python tools/program_egraph_witness.py --output egraph-witness
+```
+
+无评价器时保留未知成本，索引不表示性能顺序。六类软件见证、结构
+覆盖策略及边界见 [第十四轮等价图实现](docs/tensor-egraph-v14.zh-CN.md)。
+
 通用后端的矩阵乘法还可逐节点选择已注册的 MMUL grid1x1/1x2，
 组合于多层、分支和分工生成中。实现族同时提供守卫、生成回调和额外
 暂存需求；打包开销包含在被评价的实现内。
@@ -92,6 +105,26 @@ python -m Optimizer program-space program.json --kernel-model model.json --model
 模型必须绑定冻结的原生 TRAIN 工程及其 ELF/profile，不能用手填周期
 冒充校准。当前只覆盖特定单核、单帧 GEMM 家族；不支持的候选保留为
 未知成本。机制、协议及结果见 [第十二轮微内核与成本验证](docs/microkernels-cost-v12.zh-CN.md)。
+
+第十四轮改变了生成器身份；历史模型须随其冻结源码复现，不能改写
+摘要后直接用于新版本。新原生实验需要重新冻结生成器与 TRAIN 设计。
+
+## VCK190 / AIE1 已编译候选评价
+
+完整 Analyzer 可以作为独立评价后端。先冻结外部 checkout 的 Model
+源码，再通过隔离进程调用原公共 API，不与本仓库的基础 Model 子集混用：
+
+```bash
+python -m Optimizer analyzer-capture /path/to/full-AIE-PerfModel --output-directory build/analyzer-source
+python -m Optimizer analyzer-candidate predict-request.json --output build/candidate.json
+python -m Optimizer analyzer-evaluate build/candidate.json --backend build/analyzer-source/snapshot.json --output-directory build/evaluation --metric batch_complete
+```
+
+`analyzer-prepare` 可自动连接已有编译事实提取和正常请求准备；缺测成本
+保持缺测。评价返回首帧完整完成及有限批次时间，保留完整结果、成本
+覆盖与拒绝原因。当前比较组要求同一编译程序，并核对输入和成本场景；
+跨编译、跨结构与跨核数比较还需要统一语义证明和生成绑定。
+用法、实际 N16 一致性和支持边界见 [第十三轮接入报告](docs/analyzer-integration-v13.zh-CN.md)。
 
 ## 环境
 
@@ -182,7 +215,7 @@ python -m Optimizer frontier candidate/native_review.json --output frontier.json
 python -m unittest discover -s tests -p "test_optimizer*.py" -v
 ```
 
-完整套件包含 **187 项测试**，覆盖改写重放、等价类、DAG 抽取、执行规则、生成代码、成本拒绝与资源阶段，以及 C++/MLIR 导入、完整程序组合生成、注册式微内核和冻结留出协议。安装两组可选依赖并提供 `g++` 后可运行完整套件；缺少可选依赖时部分测试会跳过。测试里的成本和编译报告可使用合成数据，它们不构成 AIE 硬件性能证据。
+完整套件包含 **224 项测试**，覆盖改写重放、类型等价类、多输出共享 DAG 抽取、执行规则、生成代码、成本拒绝与资源阶段，以及 C++/MLIR 导入、完整程序组合生成、注册式微内核、冻结留出协议和隔离 Analyzer 评价。安装两组可选依赖并提供 `g++` 后可运行完整套件；缺少可选依赖时部分测试会跳过。测试里的成本和编译报告可使用合成数据，它们不构成 AIE 硬件性能证据。
 
 ## 项目目录
 

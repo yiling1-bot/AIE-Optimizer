@@ -112,6 +112,8 @@ def emit_compute(plan, implementation_registry=None):
 
 
 def _fixtures(contract, frames, seed, compiler):
+    from .program_ir import original_contract
+    candidate = contract; contract = original_contract(contract)
     program = contract['program']; rng = random.Random(seed); batches = []
     for f in range(frames):
         inputs = {}
@@ -135,6 +137,9 @@ def _fixtures(contract, frames, seed, compiler):
             original, details = original_cpp_outputs(artifact, source_batches, compiler)
             evidence = {'kind': 'original_cpp_host_execution', 'independent_source_checked': True, **details}
         if original != expected: raise ValueError('original source differs from complete program on generated inputs')
+    if candidate['source']['kind'] == 'verified_egraph_extraction':
+        evidence.update(original_contract_id=contract['id'],
+                        equivalence_certificate_id=candidate['source']['certificate']['id'])
     return batches, expected, {**evidence, 'input_id': identity(batches), 'output_id': identity(expected)}
 
 
@@ -219,8 +224,12 @@ def generate(contract, plan, destination, *, frames=4, seed=20261018, compiler='
     from .program_costs import cost_request
     write('analyzer_request.json', json.dumps(cost_request(contract, plan, rewrite_registry=rewrite_registry,
           implementation_registry=implementation_registry), indent=2) + '\n')
-    if contract['source']['kind'] == 'verified_source_import':
-        write('source_import.json', json.dumps(contract['source']['artifact'], indent=2) + '\n')
+    from .program_ir import original_contract
+    original = original_contract(contract)
+    if original['source']['kind'] == 'verified_source_import':
+        write('source_import.json', json.dumps(original['source']['artifact'], indent=2) + '\n')
+    if contract['source']['kind'] == 'verified_egraph_extraction':
+        write('equivalence.json', json.dumps(contract['source']['certificate'], indent=2) + '\n')
     hashes = {p.relative_to(root).as_posix(): sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file()}
     manifest = {'schema': 'aie-optimizer-program-artifact-v1', 'contract': contract, 'plan': plan,
         'frames': frames, 'seed': seed, 'files': hashes, 'source_digest': identity(hashes),

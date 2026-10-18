@@ -1,0 +1,11 @@
+feat(optimizer): integrate compiled AIE1 Analyzer evaluation
+
+- Freeze the external Analyzer and call its public APIs in an isolated worker.
+- Automate compiled-fact extraction, request preparation and TRAIN cost coverage checks.
+- Expose first-frame and batch objectives with checked input/scenario comparison groups.
+- Retain missing-cost and unsupported candidates; bound queries and revalidate cached evidence.
+- Add registered FIFO-preserving packet scheduling witnesses and pass 206 regression tests.
+
+Validate full result equality on the existing N16 case without new compilation,
+Simulator runs, cost fitting or accuracy claims. Cross-compile SSA/e-graph binding
+and AIE1 code generation remain separate follow-up work.
