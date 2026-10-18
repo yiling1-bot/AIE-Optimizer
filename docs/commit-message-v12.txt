@@ -1,0 +1,7 @@
+feat(optimizer): add general program backend with AIE-ML kernel selection
+
+- Compose full static tensor SSA rewrites, fusion, partitions and typed multi-output codegen.
+- Register guarded scalar and AIE-ML MMUL implementations with per-node selection and scratch accounting.
+- Capture source-matched ELF cycles and fit a TRAIN-only bounded GEMM cost family.
+- Freeze held-out predictions before execution and validate native outputs, ranking and selection regret.
+- Pass 187 regression tests and 11 native cases; document scalar prediction error and remaining DMA/lock limits.

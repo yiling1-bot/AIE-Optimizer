@@ -66,8 +66,69 @@ def main(argv=None):
     ac.add_argument('artifact',type=Path);ac.add_argument('--output',type=Path,required=True)
     na=sub.add_parser('native-ast-inventory',help='Audit target-compiler AST evidence without claiming semantic import')
     na.add_argument('capture',type=Path);na.add_argument('--source-artifact',type=Path,required=True);na.add_argument('--output',type=Path,required=True)
+    pg=sub.add_parser('program-import',help='Admit the complete imported tensor DAG without a layer-count template')
+    pg.add_argument('artifact',type=Path);pg.add_argument('--max-cores',type=int,default=4);pg.add_argument('--output',type=Path,required=True)
+    ps=sub.add_parser('program-space',help='Compose graph rewrites, fusion, partitions and loop lowerings')
+    ps.add_argument('contract',type=Path);ps.add_argument('--max-plans',type=int,default=24)
+    ps.add_argument('--max-variants',type=int,default=6);ps.add_argument('--max-depth',type=int,default=1)
+    ps.add_argument('--evaluation',type=Path);ps.add_argument('--output',type=Path,required=True)
+    ps.add_argument('--max-implementations',type=int,default=4);ps.add_argument('--kernel-model',type=Path)
+    ps.add_argument('--model-frames',type=int,default=1)
+    pg=sub.add_parser('program-generate',help='Generate a complete typed multi-input/multi-output ADF program')
+    pg.add_argument('contract',type=Path);pg.add_argument('plan',type=Path);pg.add_argument('--frames',type=int,default=4)
+    pg.add_argument('--compiler',default='g++');pg.add_argument('--output',type=Path,required=True)
+    pc=sub.add_parser('program-cost-request',help='Request source-scoped first-frame component costs')
+    pc.add_argument('contract',type=Path);pc.add_argument('plan',type=Path);pc.add_argument('--output',type=Path,required=True)
+    pc=sub.add_parser('program-evaluate',help='Evaluate covered conditional costs with Analyzer primitives')
+    pc.add_argument('contract',type=Path);pc.add_argument('plan',type=Path)
+    pc.add_argument('registry',type=Path);pc.add_argument('selection',type=Path);pc.add_argument('--output',type=Path,required=True)
+    pc=sub.add_parser('program-kernels',help='List callable operator implementation families and resource requirements')
+    pc.add_argument('--output',type=Path,required=True)
+    pc=sub.add_parser('program-fit-model',help='Fit a bounded family from the exact frozen TRAIN artifact set')
+    pc.add_argument('design',type=Path);pc.add_argument('training',type=Path);pc.add_argument('--output',type=Path,required=True)
+    pc=sub.add_parser('program-predict',help='Predict a covered candidate without reading its native outcomes')
+    pc.add_argument('contract',type=Path);pc.add_argument('plan',type=Path);pc.add_argument('model',type=Path);pc.add_argument('--output',type=Path,required=True)
+    pc.add_argument('--frames',type=int,default=1)
+    pc=sub.add_parser('program-freeze-predictions',help='Freeze all HO predictions before native execution')
+    pc.add_argument('design',type=Path);pc.add_argument('model',type=Path);pc.add_argument('--output',type=Path,required=True)
     args=p.parse_args(argv)
     read=lambda path:json.loads(path.read_text(encoding='utf-8'))
+    if args.command.startswith('program-'):
+        from .program_ir import program_from_import
+        from .program_planner import enumerate_plans as program_plans
+        from .program_backend import generate as program_generate
+        from .program_costs import cost_request,evaluate_costs,ProgramEvaluator
+        if args.command=='program-kernels':
+            from .program_kernels import default_implementations
+            result={'schema':'aie-optimizer-implementation-catalog-v1','implementations':default_implementations().catalog()}
+        elif args.command=='program-fit-model':
+            from .program_cost_model import fit_model
+            result=fit_model(read(args.design),read(args.training))
+        elif args.command=='program-predict':
+            from .program_cost_model import predict
+            result=predict(read(args.model),read(args.contract),read(args.plan),frames=args.frames)
+        elif args.command=='program-freeze-predictions':
+            from .program_cost_model import freeze_predictions
+            result=freeze_predictions(read(args.design),read(args.model))
+        elif args.command=='program-import':result=program_from_import(read(args.artifact),Target(max_compute_tiles=args.max_cores))
+        elif args.command=='program-space':
+            contract=read(args.contract);evaluator=None
+            if args.evaluation:
+                config=read(args.evaluation);evaluator=ProgramEvaluator(contract,config['registry'],config['selection'])
+            if args.kernel_model:
+                if args.evaluation:raise ValueError('choose one cost evaluator')
+                from .program_cost_model import KernelModelEvaluator
+                evaluator=KernelModelEvaluator(contract,read(args.kernel_model),frames=args.model_frames)
+            plans,report=program_plans(contract,max_plans=args.max_plans,max_variants=args.max_variants,
+                                       max_depth=args.max_depth,evaluator=evaluator,max_implementations=args.max_implementations)
+            result={'plans':plans,'report':report}
+        elif args.command=='program-generate':
+            result=program_generate(read(args.contract),read(args.plan),args.output,frames=args.frames,compiler=args.compiler)
+            print(json.dumps({'artifact':str(args.output.resolve()),'candidate_id':result['plan']['id']}));return 0
+        elif args.command=='program-cost-request':result=cost_request(read(args.contract),read(args.plan))
+        else:result=evaluate_costs(read(args.contract),read(args.plan),read(args.registry),read(args.selection))
+        with args.output.open('x',encoding='utf-8') as handle:handle.write(json.dumps(result,indent=2)+'\n')
+        print(json.dumps({'output':str(args.output.resolve()),'status':result.get('status','created')}));return 0
     if args.command.startswith('import-'):
         from .importing.ir import ImportFailure
         from .importing.mlir_frontend import import_mlir,export_mlir
@@ -132,9 +193,17 @@ def main(argv=None):
         print(json.dumps({'artifact':str(args.output.resolve()),'candidate_id':plan['id'],
                           'planned_compute_tiles':plan['planned_compute_tiles']}));return 0
     elif args.command=='cpu':
-        result=cpu_check(args.artifact,args.compiler);print(json.dumps(result));return result['status']!='passed'
+        if read(args.artifact/'manifest.json').get('schema')=='aie-optimizer-program-artifact-v1':
+            from .program_backend import cpu_check as program_cpu
+            result=program_cpu(args.artifact,args.compiler)
+        else:result=cpu_check(args.artifact,args.compiler)
+        print(json.dumps(result));return result['status']!='passed'
     elif args.command=='native':
-        result=native_run(args.artifact,args.platform);print(json.dumps(result));return result['status']!='verified'
+        if read(args.artifact/'manifest.json').get('schema')=='aie-optimizer-program-artifact-v1':
+            from .program_native import native_run as program_native
+            result=program_native(args.artifact,args.platform)
+        else:result=native_run(args.artifact,args.platform)
+        print(json.dumps(result));return result['status']!='verified'
     elif args.command=='review':
         print(json.dumps(review_native(args.artifact)));return 0
     elif args.command=='search':

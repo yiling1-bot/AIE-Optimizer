@@ -12,12 +12,12 @@ AIE Optimizer 从经过检查的计算语义出发，构造同一算法的多种
 | --- | --- | --- |
 | 代码导入 | 基于 xDSL 的静态整数张量 MLIR 导入；基于 Clang AST 的 C++ 数组循环导入 | 导入范围大于代码生成范围；不支持的语义给出拒绝原因 |
 | 语义与等价类 | 类型、形状和整数范围检查；可重放的改写记录；e-class 合并、hash-consing 与同余闭包 | 可信 Python 规则注册接口，不是外部形式化证明器 |
-| 实现探索 | M/K/N 方向的部分分解、重算/共享选择；完整 DAG 抽取 | 按显式轮数、状态数及候选预算展开，不保证全局最优 |
+| 实现探索 | 既有等价类抽取；通用 SSA 的 M/K 分解、融合、核划分及逐节点实现族组合；合并相同生成实现 | 有界展开；新通用算子路径尚未全部接入既有 e-graph |
 | 执行与部署 | 融合、核复用、独立核组、汇聚、累加器网格、输出直写、循环交换、scratch 调度 | 8 条已实现执行规则；cascade、通用 DMA 和布局自动优化尚待实现 |
-| 成本与筛选 | 多输入 acquire/compute/copy/release 阶段图；buffer slot、别名、资源顺序和死锁检查 | 成本覆盖与来源显式检查；未覆盖候选保留，条件估计不冒充实测 |
-| 生成与验证 | ADF graph、C++ kernel、打包输入、独立参考、CPU 检查、限时原生编译/仿真与前沿筛选 | 当前原生后端限定两层 INT8、AIE-ML、Vitis 2024.2 |
+| 成本与筛选 | 通用首帧组件请求；原 ELF 周期采集、TRAIN 限域拟合、冻结留出预测及条件排序 | 首个模型仅为单核单帧 GEMM 家族；传输为名义服务，启动/同步为合并残差；真实 DMA/锁与跨帧仍待校准 |
+| 生成与验证 | 层数可变、分支、多输出的静态 i8/i16/i32 SSA → ADF/C++；可注册标量与 AIE-ML MMUL grid1x1/1x2；源参考、CPU 与限时原生入口 | MMUL 受类型、微块及 i32 范围守卫约束；目标为 AIE-ML / Vitis 2024.2 |
 
-当前后端的数值契约为：
+既有 MMUL 优化路径的数值契约为：
 
 ```text
 H = Q0(X @ W0)
@@ -50,6 +50,48 @@ flowchart TD
 ```
 
 源码阅读路线见 [架构与模块](docs/architecture.zh-CN.md)，支持边界和研究进度见 [状态与路线图](docs/status.zh-CN.md)。
+
+## 通用图生成：多层、分支和多输出
+
+`program-*` 入口直接消费完整导入图，不经过两层 `Spec` 准入。支持当前
+张量 IR 的整数矩阵乘法、逐元素算术、整数转换、转置、静态切片、拼接、
+常量与 splat；层数由图决定。原函数输入和结果全部保留在显式源绑定中，
+运行时接口归一为按类型、按结果划分的 PLIO，帧补齐到 16 字节。
+
+```bash
+python -m Optimizer import-mlir tests/fixtures/optimizer_program/three_layer.mlir --output imported.json
+python -m Optimizer program-import imported.json --max-cores 3 --output program.json
+python -m Optimizer program-space program.json --max-plans 24 --output program-space.json
+python tools/select_plan.py program-space.json program-plan.json --index 1
+python -m Optimizer program-generate program.json program-plan.json --frames 4 --output program-candidate
+python -m Optimizer cpu program-candidate
+python -m Optimizer program-cost-request program.json program-plan.json --output cost-request.json
+```
+
+用同一流程检查三层矩阵链、FIR、分支图和 C++ 双输出样例：
+
+```bash
+python tools/program_reuse_witness.py --output reuse-witness
+```
+
+这组见证检查正确性和复用范围；候选索引不表示性能排名。新路径的
+算子组合、规则扩展、成本接口及尚未解决的限制见
+[第十一轮通用程序实现](docs/program-ir-v11.zh-CN.md)。
+
+通用后端的矩阵乘法还可逐节点选择已注册的 MMUL grid1x1/1x2，
+组合于多层、分支和分工生成中。实现族同时提供守卫、生成回调和额外
+暂存需求；打包开销包含在被评价的实现内。
+
+```bash
+python -m Optimizer program-kernels --output implementations.json
+python -m Optimizer program-fit-model design.json train-artifacts.json --output model.json
+python -m Optimizer program-freeze-predictions design.json model.json --output prediction-lock.json
+python -m Optimizer program-space program.json --kernel-model model.json --model-frames 1 --output ranked-space.json
+```
+
+模型必须绑定冻结的原生 TRAIN 工程及其 ELF/profile，不能用手填周期
+冒充校准。当前只覆盖特定单核、单帧 GEMM 家族；不支持的候选保留为
+未知成本。机制、协议及结果见 [第十二轮微内核与成本验证](docs/microkernels-cost-v12.zh-CN.md)。
 
 ## 环境
 
@@ -132,7 +174,7 @@ python -m Optimizer frontier candidate/native_review.json --output frontier.json
 
 多个 `native_review.json` 可一同传给 `frontier`。只有输出正确、映射吻合、比较条件一致的已验证候选才能进入原生前沿。
 
-当前生成接口统一为 X/W0/W1 三个完整帧的 128-bit 输入 PLIO，以及一个输出 PLIO；权重逐帧变化。首输出指标为仿真起点到首个完整 Y，包含启动阶段。这与原工程接口、单 kernel 周期及板卡端到端延迟分别有不同边界，应按相同接口、输入、工具链、平台及计时条件比较。
+既有两层生成器的接口为 X/W0/W1 三个完整帧的 128-bit 输入 PLIO，以及一个输出 PLIO；权重逐帧变化。通用程序路径按完整源图提供多个有类型的输入和输出 PLIO。首输出指标为仿真起点到首帧全部结果完成，包含启动阶段。这与原工程接口、单 kernel 周期及板卡端到端延迟分别有不同边界，应按相同接口、输入、工具链、平台及计时条件比较。
 
 ## 测试
 
@@ -140,7 +182,7 @@ python -m Optimizer frontier candidate/native_review.json --output frontier.json
 python -m unittest discover -s tests -p "test_optimizer*.py" -v
 ```
 
-完整套件包含 **146 项测试**，覆盖改写重放、等价类、DAG 抽取、执行规则、生成代码、成本拒绝与资源阶段，以及 C++/MLIR 导入。安装两组可选依赖并提供 `g++` 后可运行完整套件；缺少可选依赖时部分测试会跳过。测试里的成本和编译报告可使用合成数据，它们不构成 AIE 硬件性能证据。
+完整套件包含 **187 项测试**，覆盖改写重放、等价类、DAG 抽取、执行规则、生成代码、成本拒绝与资源阶段，以及 C++/MLIR 导入、完整程序组合生成、注册式微内核和冻结留出协议。安装两组可选依赖并提供 `g++` 后可运行完整套件；缺少可选依赖时部分测试会跳过。测试里的成本和编译报告可使用合成数据，它们不构成 AIE 硬件性能证据。
 
 ## 项目目录
 
@@ -156,7 +198,7 @@ requirements-dev.txt    完整测试所需的可选前端依赖
 
 ## 后续方向
 
-优先补齐 AIE-ML 核内周期证据和锁/DMA/缓冲成本，使用留出候选检验模型排名，再扩大代码导入、布局、通信机制和真实应用覆盖。文献中的方法需要先落实为带合法性条件、可执行回调、代码生成和验证的规则；`rules` 输出中的 `specified_not_implemented`、`guard_only` 和 `checker_only` 均不代表已有完整优化器支持。
+优先将通用算子 lowering 扩展为可注册的高性能实现族，接入 MMUL 和编译周期证据；继续恢复锁/DMA/缓冲成本，用留出候选检验模型排名，并扩大等价抽取、代码导入和真实应用覆盖。文献中的方法需要落实为带合法性条件、可执行回调、代码生成和验证的规则；既有 `rules` 输出中的 `specified_not_implemented`、`guard_only` 和 `checker_only` 均不代表已有完整优化器支持。
 
 ## 来源与许可
 
